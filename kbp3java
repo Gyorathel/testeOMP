@@ -1,0 +1,405 @@
+/* sw=4 */
+
+/**
+ * URL http://jradley.com/tech/knights_tour
+ *
+ * @version 1.1
+ * @author James Radley (james@jradley.com)
+ *
+ * Java program to test the operation of multi threaded applications.
+ * The program is intended to provide CPU bound loads as a tool for
+ * performance testing.
+ *
+ * The program implements an algorithm for resolving the Knights Tour problem.
+ * The algorithm is well suited for a parallel execution environment.
+ *
+ * To be used efficiently Native Threads must be supported
+ * and specified in the Virtual Machine environment.
+ */
+
+/**
+ * Global class for storage of module wide resource.
+ */
+
+class Glb
+{
+    // byte casting used to get round over zealous versions of javac.
+    public static final byte	SIDE = (byte) 6;
+    public static final byte	SQUARE = (byte)(SIDE * SIDE);
+
+    // Set the default number of threads to 8 for no better reason than that
+    // from an arbitrary square a knight has the potential to jump to 8 squares.
+    public static final int	NUM_OF_DEFAULT_THREADS = 8;
+
+    // Set the prune range. Requires lots of tuning see KnightsMove->Move()
+    public static final int	PRUNE_START = 0;
+    public static final int	PRUNE_END = 0;
+
+    public static ThreadManager	TM;
+}
+
+/**
+ * KnightsTour is the main object in this module.
+ */
+
+class KnightsTour
+{
+    /*
+     * The main() method in KnightsTour kicks off n threads to solve the
+     * Knights tour problem. It takes upto 1 argument [number_of_threads].
+     * If not specified number_of_threads defaults to Glb.NUM_OF_DEFAULT_THREADS
+     */
+    public static void main(String[] args)
+    {
+	int numthreads = -1;
+
+	switch (args.length)
+	{
+	    case 0:	numthreads = Glb.NUM_OF_DEFAULT_THREADS;
+			    break;
+	    case 1:	numthreads = Integer.valueOf(args[0]).intValue();
+			    break;
+	    default:	System.err.println("Useage Class Num_Of_Threads");
+			    System.exit (1);
+			    break;
+	}
+
+	Glb.TM = new ThreadManager(numthreads);
+
+	// And go start all threads.
+	Glb.TM.ThreadStart();
+
+	// Exit this thread, the others will keep us alive.
+    }
+}
+
+// Class to hold the pattern of potential knight moves
+class MoveDef
+{
+    static final byte[] X = {-2, -2, -1, -1,  1,  1,  2,  2};
+    static final byte[] Y = {-1,  1, -2,  2,  2, -2,  1, -1};
+} 
+
+class ThreadManager
+{
+    private String horzLine;
+    private int numThreads;
+    private int parkedThreads = 0;
+    private byte jumpNumber = 0;
+    public KnightsMove[] knMv; 	//Can't declare array size yet
+
+    // Constructor
+    ThreadManager(int numThreads)
+    {
+
+	horzLine = "-";
+	for (int a = Glb.SIDE; a > 0; a--)
+	    horzLine += "---";
+
+	knMv = new KnightsMove[numThreads];
+	this.numThreads = numThreads;
+
+	for (int a = 0; a < numThreads; a++)
+	    knMv[a] = new KnightsMove(a);
+
+	/* Seed the initial chess board */
+	/** The algorithm starts the knight on a corner square.
+	 *  Because any solution is symmetrical across the diagonal there
+	 *  need only be 1 initial jump. So do it here.
+	 */
+	knMv[0].SetSquare(0, 0, ++jumpNumber);
+	knMv[0].SetSquare(1, 2, ++jumpNumber);
+
+	/** Reserve the homecoming square to avoid futile scans.
+	 *  This trick appears to improve solution time 5 fold !!!!
+	 */
+	knMv[0].chessBoard[2][1] = -1;
+    }
+
+    public void ThreadStart()
+    {
+	// Start thread 0 last so that it should find some helpers early on
+	for (int a = numThreads; --a >= 0; )
+	    knMv[a].start();
+    }
+
+    public synchronized void ReportForWork(int threadId)
+    {
+	int minsofar = Glb.SQUARE;
+	int best = threadId;
+
+	if (++parkedThreads >= numThreads)
+	{
+	    // It appears that all work is done
+	    System.out.println("Ending on thread " + threadId);
+	    System.exit (0);
+	}
+
+	// Park this thread by making it appear done.
+	knMv[threadId].currentDepth = Glb.SQUARE;
+
+	// Identify which thread we want to run on next (lowest current depth)
+	for (int cd, a = 0; a < numThreads; a++)
+	    if ((cd = knMv[a].currentDepth) < minsofar)
+	    {
+		minsofar = cd;
+		best = a;
+	    }
+
+	// Assign this thread to the 'best' thread (or it's last helper).
+	while (knMv[best].helperThread != -1)
+	    best = knMv[best].helperThread;
+
+	knMv[best].helperThread = threadId;
+System.out.println("Thread " + threadId + " to help thread " + best);
+
+	try
+	{
+	    wait();
+	}
+	// We don't notify the threads because they can not be directed
+	catch (InterruptedException e)
+	{
+	    //Just get out of here, our caller will know what to do next.
+	    return;
+	}
+	catch (Exception e)
+	{
+	    System.err.println("wait() throw a " + e.getClass());
+	    System.err.println("   with a message " + e.getMessage());
+
+	    System.exit(1);
+	}
+    }
+
+    public synchronized void HireHelp(int current, int newthread)
+    {
+	/** The current thread will be kicking off threads to work at a
+	 *  depth 1 higher than itself. The new helper may head a linked
+	 *  list of fellow helpers. As this (the current) thread has the
+	 *  higher potential (lower depth) we steal (re-link) the helper
+	 *  list to belong to it.
+	 */
+	if (knMv[newthread].helperThread != -1)
+	{
+	    knMv[current].helperThread = knMv[newthread].helperThread;
+	    knMv[newthread].helperThread = -1;
+	}
+	else
+	    knMv[current].helperThread = -1;
+
+	// Now interrupt the waiting new thread
+	parkedThreads--;
+	knMv[newthread].interrupt();
+System.out.println("Thread " + current + " picked up " + newthread);
+    }
+
+    public synchronized void PrintBoard(int threadId)
+    {
+	int x, y;
+	byte tmp;
+
+	System.out.print("Thread: " + threadId);
+
+	for (y = 0; y < Glb.SIDE; y++)
+	{
+	    System.out.println("");
+	    System.out.println(horzLine);
+	    System.out.print("|");
+
+	    for (x = 0; x < Glb.SIDE; x++)
+	    {
+		if ((tmp = knMv[threadId].chessBoard[x][y]) < 10)
+		    System.out.print(" " + tmp + "|");
+		else
+		    System.out.print(tmp + "|");
+	    }
+	}
+
+	System.out.println("");
+	System.out.println(horzLine);
+	System.out.println("");
+
+	System.out.flush();
+    }
+}
+
+class KnightsMove extends Thread
+{
+    public  byte[][]	chessBoard = new byte[Glb.SIDE][Glb.SIDE];
+    public  int		currentDepth = Glb.SQUARE; // Don't help me yet.
+    public  int		helperThread = -1;	//No assigned helper at present
+    private int		currentX, currentY;
+    private int		threadId;
+
+    // Constructor
+    KnightsMove(int threadId)
+    {
+	this.threadId = threadId;
+	if (threadId == 0)
+	    currentDepth = 0;	// Make this thread attractive to the others
+    }
+
+    public void run ()
+    {
+	if (threadId == 0)
+	    this.Move((byte)2);
+
+	while (true)
+	{
+	    Glb.TM.ReportForWork(threadId);
+	    // The previous thread will have prepared everything for us.
+	    Move((byte) currentDepth);
+	}
+    }
+
+    public void ClrSquare(int x, int y)
+    {
+	chessBoard[x][y] = 0;
+	currentDepth--;
+    }
+
+    public void BoardCpy(byte[][] newarray, byte[][] oldarray)
+    {
+	for (int y = 0; y < Glb.SIDE; y++)
+	    for (int x = 0; x < Glb.SIDE; x++)
+		newarray[x][y] = oldarray[x][y];
+    }
+
+    public void SetSquare(int x, int y, byte val)
+    {
+	chessBoard[x][y] = val;
+	currentDepth = val;	// Used by threads to identify their next task.
+	currentX = x;
+	currentY = y;
+    }
+
+    private boolean isMoveValid(int x, int y, int MoveCnt)
+    {
+	int	newX, newY;
+
+	// We check for a square being <= 0 because in the context that
+	// this check is used we want to know if we can get home through
+	// the reserved square (indicated with -1)
+
+	if (((newX = x + MoveDef.X[MoveCnt]) >= 0) && (newX < Glb.SIDE)
+	&& ((newY = y + MoveDef.Y[MoveCnt]) >= 0) && (newY < Glb.SIDE)
+	&& (chessBoard[newX][newY] <= 0))
+	    return true;
+	else
+	    return false;
+    }
+
+    public void Move(byte jumpnum)
+    {
+	int	newX, newY;
+	int	oldX = currentX;
+	int	oldY = currentY;
+
+	if (jumpnum++ >= Glb.SQUARE - 1)
+	{
+	    // Time to free the blocked homecoming square
+	    if (jumpnum == Glb.SQUARE)
+		chessBoard[2][1] = 0;
+	    else
+	    {
+		/*
+		 * Wow we've visited every square on the board, but have we
+		 * completed a round trip. Starting at the first square can we
+		 * see the last?
+		 * A real cheat, the last square can only be [2, 1]
+		 */
+		if (chessBoard[2][1] == jumpnum - 1)
+		    Glb.TM.PrintBoard(threadId);
+		return;
+	    }
+	}
+
+	// At most a knight can jump next to one of 8 possible squares
+	for (int move_cnt = 0; move_cnt < 8; move_cnt++)
+	{
+
+	    // Don't use isMoveValid() as we need newX,Y and inline is faster
+	    if (((newX = currentX + MoveDef.X[move_cnt]) >= 0)
+	    && (newX < Glb.SIDE)
+	    && ((newY = currentY + MoveDef.Y[move_cnt]) >= 0)
+	    && (newY < Glb.SIDE)
+	    && (chessBoard[newX][newY] == 0))
+	    {
+		// We can make a further move from this square
+
+		/** For every valid new move we can conduct a sanity check
+		 *  which allows us to prune doomed branches from our search.
+		 *  For every unvisited square which we could have reached
+		 *  with this jump we consider if an imaginary knight situated
+		 *  on these squares can now reach another vacant square.
+		 *  If it can not then clearly this unvisited square is now
+		 *  isolated because if the imaginary knight can't get out,
+		 *  none can get in. Hence the real move we are considering is
+		 *  fatal and shall result in eventual failure.
+		 *  Such a test in itself consumes substantial CPU bandwidth
+		 *  so we only conduct this test early on when the resultant
+		 *  failed branch saving is significant.
+		 */
+		if ((jumpnum <= Glb.PRUNE_END) && (jumpnum >= Glb.PRUNE_START))
+		{
+		    int		others_cnt;
+		    boolean	other_vacant_sqrs = false;
+
+		prune:
+		    for (others_cnt = 0; others_cnt < 8; others_cnt++)
+		    {
+			if (others_cnt == move_cnt)
+			    continue;	// Our real move, ignore.
+
+			if (isMoveValid(currentX, currentY, others_cnt))
+			{
+			    // This is another square we could have visited.
+
+			    int vacantX, vacantY;
+
+			    other_vacant_sqrs = true;
+			    vacantX = currentX + MoveDef.X[others_cnt];
+			    vacantY = currentY + MoveDef.Y[others_cnt];
+
+			    for (int isolated_cnt = 0; isolated_cnt < 8; )
+			    {
+				if (isMoveValid(vacantX, vacantY, isolated_cnt))
+				    break prune;
+				isolated_cnt++;	// Why? Keeps nice formatting
+			    }
+			}
+		    }
+
+		    // Move is not sane so continue searching
+		    if (other_vacant_sqrs && (others_cnt == 8))
+			continue;
+		}
+
+		if ((helperThread != -1) && (move_cnt < 7))
+		{
+		    // There is a helper & its not the last try at this level
+		    BoardCpy(Glb.TM.knMv[helperThread].chessBoard, chessBoard);
+		    Glb.TM.knMv[helperThread].SetSquare(newX, newY, jumpnum);
+		    Glb.TM.HireHelp(threadId, helperThread);
+		}
+		else
+		{
+		    SetSquare(newX, newY, jumpnum);
+		    this.Move(jumpnum);
+		    ClrSquare(newX, newY);
+		    currentX = oldX;
+		    currentY = oldY;
+		}
+	    }
+	    else
+		continue;
+	}
+
+	// This is the price of covering the homebound square.
+	if (jumpnum == Glb.SQUARE)
+	    chessBoard[2][1] = -1;
+
+	return;
+    }
+}
